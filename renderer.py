@@ -29,23 +29,21 @@ class Renderer:
         self.preset_name = "None"
         self._frame_count = 0
         self._fps_time = time.time()
+        # Camera overlay cache
+        self._cam_cache_key: tuple[int, int] | None = None
+        self._cam_cache_surf: pygame.Surface | None = None
 
     def set_camera_frame(self, frame: np.ndarray):
-        """Store camera frame for overlay display."""
         self.camera_frame = frame
 
     def draw(self, params: AnimationParams):
-        """Render one frame."""
         self.screen.fill(config.COLOR_BG)
 
-        # Draw avatar
         self.avatar.draw(self.screen, params)
 
-        # Camera overlay
         if self.show_camera and self.camera_frame is not None:
             self._draw_camera_overlay()
 
-        # HUD
         self._draw_hud()
 
         pygame.display.flip()
@@ -53,43 +51,50 @@ class Renderer:
         self._update_fps()
 
     def _draw_camera_overlay(self):
-        """Draw small camera feed in bottom-right corner."""
         frame = self.camera_frame
         if frame is None:
             return
-        # BGR to RGB
-        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        h, w = rgb.shape[:2]
-        ow, oh = config.CAMERA_OVERLAY_SIZE
-        scale = min(ow / w, oh / h)
-        nw, nh = int(w * scale), int(h * scale)
-        resized = cv2.resize(rgb, (nw, nh))
-        surf = pygame.surfarray.make_surface(resized.swapaxes(0, 1))
+
+        h, w = frame.shape[:2]
+        cache_key = (w, h)
+
+        if self._cam_cache_key != cache_key:
+            ow, oh = config.CAMERA_OVERLAY_SIZE
+            scale = min(ow / w, oh / h)
+            nw, nh = int(w * scale), int(h * scale)
+            rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            resized = cv2.resize(rgb, (nw, nh))
+            self._cam_cache_surf = pygame.surfarray.make_surface(resized.swapaxes(0, 1))
+            self._cam_cache_key = cache_key
+            self._cam_cache_size = (nw, nh)
+        else:
+            # Still need to update pixel data but reuse surface dimensions
+            ow, oh = config.CAMERA_OVERLAY_SIZE
+            nw, nh = self._cam_cache_size
+            rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            resized = cv2.resize(rgb, (nw, nh))
+            pygame.surfarray.blit_array(self._cam_cache_surf, resized.swapaxes(0, 1))
 
         margin = config.CAMERA_OVERLAY_MARGIN
         x = config.WINDOW_WIDTH - nw - margin
         y = config.WINDOW_HEIGHT - nh - margin
-        self.screen.blit(surf, (x, y))
+        self.screen.blit(self._cam_cache_surf, (x, y))
         pygame.draw.rect(self.screen, (255, 255, 255),
                          (x - 1, y - 1, nw + 2, nh + 2), 1)
 
     def _draw_hud(self):
-        """Draw status information."""
         y = 10
-        # FPS
         fps_text = self.font.render(f"FPS: {self.fps_display:.0f}", True,
                                     (200, 200, 200))
         self.screen.blit(fps_text, (10, y))
         y += 22
 
-        # Preset
         if self.preset_name != "None":
             preset_text = self.font.render(
                 f"Preset: {self.preset_name}", True, (100, 200, 255))
             self.screen.blit(preset_text, (10, y))
             y += 22
 
-        # Controls hint
         hint = "Q:Quit  1-5:Expr  R:Reset  S:Shot  C:Camera"
         hint_text = self.small_font.render(hint, True, (120, 120, 120))
         self.screen.blit(hint_text, (10, config.WINDOW_HEIGHT - 20))
@@ -104,7 +109,6 @@ class Renderer:
             self._fps_time = now
 
     def save_screenshot(self):
-        """Save current frame as screenshot."""
         timestamp = time.strftime("%Y%m%d_%H%M%S")
         filename = f"screenshot_{timestamp}.png"
         pygame.image.save(self.screen, filename)

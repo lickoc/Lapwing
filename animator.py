@@ -1,6 +1,6 @@
 """Parameter calculation and smoothing from detection results."""
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 import math
 import cv2
 import numpy as np
@@ -24,7 +24,7 @@ class AnimationParams:
     left_eyebrow: float = 0.0
     right_eyebrow: float = 0.0
 
-    # Head rotation (degrees)
+    # Head rotation (normalized -1 to 1)
     head_pitch: float = 0.0  # up/down
     head_yaw: float = 0.0  # left/right
     head_roll: float = 0.0  # tilt
@@ -34,7 +34,7 @@ class AnimationParams:
     body_y: float = 0.5
     shoulder_width: float = 0.5
 
-    # Arms (endpoints relative to body, 0-1)
+    # Arms (endpoints relative to body)
     left_arm_x: float = 0.0
     left_arm_y: float = 0.0
     right_arm_x: float = 0.0
@@ -66,48 +66,53 @@ class SmoothState:
     right_arm_y: float = 0.0
 
 
-# Predefined expressions
 EXPRESSIONS = {
-    1: {"name": "Neutral", "left_eye_open": 0.5, "right_eye_open": 0.5, "mouth_open": 0.0, "mouth_smile": 0.0,
+    1: {"name": "Neutral", "left_eye_open": 0.5, "right_eye_open": 0.5,
+        "mouth_open": 0.0, "mouth_smile": 0.0,
         "left_eyebrow": 0.0, "right_eyebrow": 0.0},
-    2: {"name": "Smile", "left_eye_open": 0.4, "right_eye_open": 0.4, "mouth_open": 0.2, "mouth_smile": 1.0,
+    2: {"name": "Smile", "left_eye_open": 0.35, "right_eye_open": 0.35,
+        "mouth_open": 0.15, "mouth_smile": 1.0,
         "left_eyebrow": 0.3, "right_eyebrow": 0.3},
-    3: {"name": "Surprise", "left_eye_open": 1.0, "right_eye_open": 1.0, "mouth_open": 0.8, "mouth_smile": 0.0,
-        "left_eyebrow": 0.8, "right_eyebrow": 0.8},
-    4: {"name": "Angry", "left_eye_open": 0.3, "right_eye_open": 0.3, "mouth_open": 0.1, "mouth_smile": -0.8,
-        "left_eyebrow": -0.7, "right_eyebrow": -0.7},
-    5: {"name": "Sad", "left_eye_open": 0.3, "right_eye_open": 0.3, "mouth_open": 0.0, "mouth_smile": -0.5,
-        "left_eyebrow": 0.5, "right_eyebrow": -0.3},
+    3: {"name": "Surprise", "left_eye_open": 1.0, "right_eye_open": 1.0,
+        "mouth_open": 0.9, "mouth_smile": 0.0,
+        "left_eyebrow": 0.9, "right_eyebrow": 0.9},
+    4: {"name": "Angry", "left_eye_open": 0.25, "right_eye_open": 0.25,
+        "mouth_open": 0.1, "mouth_smile": -0.9,
+        "left_eyebrow": -0.8, "right_eyebrow": -0.8},
+    5: {"name": "Sad", "left_eye_open": 0.25, "right_eye_open": 0.25,
+        "mouth_open": 0.0, "mouth_smile": -0.6,
+        "left_eyebrow": 0.6, "right_eyebrow": -0.4},
 }
-
-
-def _lerp(a: float, b: float, t: float) -> float:
-    return a + (b - a) * t
 
 
 def _clamp(v: float, lo: float = -1.0, hi: float = 1.0) -> float:
     return max(lo, min(hi, v))
 
 
+def _deadzone(v: float, dz: float = config.DEADZONE) -> float:
+    """Apply deadzone: return 0 if magnitude is below threshold."""
+    if abs(v) < dz:
+        return 0.0
+    return v
+
+
 def _smooth(current: float, target: float, alpha: float) -> float:
-    return _lerp(current, target, 1.0 - alpha)
+    return current + (target - current) * (1.0 - alpha)
 
 
 def _compute_head_pose(landmarks: list[dict]) -> tuple[float, float, float]:
     """Compute head pitch, yaw, roll from face landmarks using solvePnP."""
-    h, w = 480, 640  # frame dimensions
+    h, w = 480, 640
 
-    # 3D model points (generic face model)
     model_points = np.array([
-        [0.0, 0.0, 0.0],       # Nose tip (index 1)
-        [0.0, -63.6, -12.5],    # Chin (index 152)
-        [-43.3, 32.7, -26.0],   # Left eye left corner (index 33)
-        [43.3, 32.7, -26.0],    # Right eye right corner (index 263)
-        [-28.9, -28.9, -24.1],  # Left mouth corner (index 61)
-        [28.9, -28.9, -24.1],   # Right mouth corner (index 291)
+        [0.0, 0.0, 0.0],       # Nose tip (1)
+        [0.0, -63.6, -12.5],    # Chin (152)
+        [-43.3, 32.7, -26.0],   # Left eye corner (33)
+        [43.3, 32.7, -26.0],    # Right eye corner (263)
+        [-28.9, -28.9, -24.1],  # Left mouth (61)
+        [28.9, -28.9, -24.1],   # Right mouth (291)
     ], dtype=np.float64)
 
-    # 2D image points from landmarks
     image_points = np.array([
         [landmarks[1]["x"] * w, landmarks[1]["y"] * h],
         [landmarks[152]["x"] * w, landmarks[152]["y"] * h],
@@ -117,7 +122,6 @@ def _compute_head_pose(landmarks: list[dict]) -> tuple[float, float, float]:
         [landmarks[291]["x"] * w, landmarks[291]["y"] * h],
     ], dtype=np.float64)
 
-    # Camera internals (approximate)
     focal_length = w
     center = (w / 2, h / 2)
     camera_matrix = np.array([
@@ -136,7 +140,6 @@ def _compute_head_pose(landmarks: list[dict]) -> tuple[float, float, float]:
 
     rmat, _ = cv2.Rodrigues(rotation_vec)
 
-    # Extract Euler angles
     sy = math.sqrt(rmat[0, 0] ** 2 + rmat[1, 0] ** 2)
     singular = sy < 1e-6
     if not singular:
@@ -148,12 +151,7 @@ def _compute_head_pose(landmarks: list[dict]) -> tuple[float, float, float]:
         yaw = math.atan2(-rmat[1, 2], rmat[1, 1])
         roll = 0.0
 
-    # Convert to degrees
-    pitch = math.degrees(pitch)
-    yaw = math.degrees(yaw)
-    roll = math.degrees(roll)
-
-    return pitch, yaw, roll
+    return math.degrees(pitch), math.degrees(yaw), math.degrees(roll)
 
 
 class ParameterAnimator:
@@ -171,117 +169,120 @@ class ParameterAnimator:
         p = AnimationParams()
 
         if face_landmarks:
-            landmarks = face_landmarks[0]
+            lm = face_landmarks[0]
 
-            # Eyes: use iris landmarks (refined face mesh)
-            # Left eye: landmarks 468-472 (iris center ~468), open: vertical distance between lids
-            left_upper = landmarks[159]["y"]
-            left_lower = landmarks[145]["y"]
-            left_eye_height = abs(left_upper - left_lower)
-            p.left_eye_open = _clamp(left_eye_height * 8.0, 0.0, 1.0)
+            # --- Eyes ---
+            # Eye opening: vertical distance between upper and lower eyelids
+            # Left eye: upper lid 159, lower lid 145
+            left_eye_h = abs(lm[159]["y"] - lm[145]["y"])
+            p.left_eye_open = _clamp(left_eye_h * 10.0, 0.0, 1.0)
 
-            right_upper = landmarks[386]["y"]
-            right_lower = landmarks[374]["y"]
-            right_eye_height = abs(right_upper - right_lower)
-            p.right_eye_open = _clamp(right_eye_height * 8.0, 0.0, 1.0)
+            # Right eye: upper lid 386, lower lid 374
+            right_eye_h = abs(lm[386]["y"] - lm[374]["y"])
+            p.right_eye_open = _clamp(right_eye_h * 10.0, 0.0, 1.0)
 
-            # Eye gaze direction (from iris landmarks)
-            if len(landmarks) > 473:
-                left_iris_x = landmarks[468]["x"]
-                left_eye_center_x = (landmarks[33]["x"] + landmarks[133]["x"]) / 2
-                p.eye_x = _clamp((left_iris_x - left_eye_center_x) * 10.0)
+            # Eye gaze (iris position relative to eye center)
+            if len(lm) > 473:
+                # Left eye
+                iris_x = lm[468]["x"]
+                eye_center_x = (lm[33]["x"] + lm[133]["x"]) / 2
+                iris_y = lm[468]["y"]
+                eye_center_y = (lm[159]["y"] + lm[145]["y"]) / 2
+                p.eye_x = _deadzone(_clamp((iris_x - eye_center_x) * 15.0))
+                p.eye_y = _deadzone(_clamp((iris_y - eye_center_y) * 15.0))
 
-                left_iris_y = landmarks[468]["y"]
-                left_eye_center_y = (landmarks[159]["y"] + landmarks[145]["y"]) / 2
-                p.eye_y = _clamp((left_iris_y - left_eye_center_y) * 10.0)
+            # --- Mouth ---
+            # Mouth open: vertical distance between upper and lower lip
+            mouth_h = abs(lm[13]["y"] - lm[14]["y"])
+            p.mouth_open = _clamp(mouth_h * 10.0, 0.0, 1.0)
 
-            # Mouth open: vertical distance between lips
-            upper_lip = landmarks[13]["y"]
-            lower_lip = landmarks[14]["y"]
-            mouth_height = abs(upper_lip - lower_lip)
-            p.mouth_open = _clamp(mouth_height * 8.0, 0.0, 1.0)
-
-            # Mouth smile: horizontal mouth corners vs center
-            left_corner = landmarks[61]["x"]
-            right_corner = landmarks[291]["x"]
-            mouth_center_x = (left_corner + right_corner) / 2
-            mouth_width = abs(right_corner - left_corner)
-            left_corner_y = landmarks[61]["y"]
-            right_corner_y = landmarks[291]["y"]
+            # Mouth smile: compare lip center Y to mouth corner Y
+            # When smiling, corners go UP (lower y), lip center stays or goes down
+            left_corner_y = lm[61]["y"]
+            right_corner_y = lm[291]["y"]
             corner_avg_y = (left_corner_y + right_corner_y) / 2
-            lip_center_y = landmarks[13]["y"]
-            p.mouth_smile = _clamp((lip_center_y - corner_avg_y) / (mouth_width + 1e-6) * 5.0)
+            lip_center_y = lm[13]["y"]  # upper lip center
+            mouth_width = abs(lm[291]["x"] - lm[61]["x"])
 
-            # Eyebrows
-            left_brow_y = landmarks[70]["y"]
-            left_eye_top = landmarks[159]["y"]
-            brow_eye_gap = (left_eye_top - left_brow_y) * 5.0
-            p.left_eyebrow = _clamp(brow_eye_gap - 0.5)
+            # Positive = corners below center (frown), Negative = corners above (smile)
+            # We invert so positive = smile
+            if mouth_width > 0.001:
+                smile_raw = -(corner_avg_y - lip_center_y) / mouth_width
+                p.mouth_smile = _deadzone(_clamp(smile_raw * 4.0))
+            else:
+                p.mouth_smile = 0.0
 
-            right_brow_y = landmarks[300]["y"]
-            right_eye_top = landmarks[386]["y"]
-            brow_eye_gap_r = (right_eye_top - right_brow_y) * 5.0
-            p.right_eyebrow = _clamp(brow_eye_gap_r - 0.5)
+            # --- Eyebrows ---
+            # Distance from eyebrow to eye top — larger gap = raised brow
+            left_brow_y = lm[70]["y"]
+            left_eye_top_y = lm[159]["y"]
+            left_gap = left_eye_top_y - left_brow_y  # positive = brow above eye
+            p.left_eyebrow = _deadzone(_clamp((left_gap - 0.04) * 15.0))
 
-            # Head pose
-            pitch, yaw, roll = _compute_head_pose(landmarks)
-            p.head_pitch = _clamp(pitch / 30.0) * config.HEAD_ROTATION_SCALE
-            p.head_yaw = _clamp(yaw / 30.0) * config.HEAD_ROTATION_SCALE
-            p.head_roll = _clamp(roll / 30.0) * config.HEAD_ROTATION_SCALE
+            right_brow_y = lm[300]["y"]
+            right_eye_top_y = lm[386]["y"]
+            right_gap = right_eye_top_y - right_brow_y
+            p.right_eyebrow = _deadzone(_clamp((right_gap - 0.04) * 15.0))
 
-        if pose_landmarks:
-            # Shoulders (landmarks 11=left, 12=right)
-            left_shoulder = pose_landmarks[11]
-            right_shoulder = pose_landmarks[12]
-            p.body_x = (left_shoulder["x"] + right_shoulder["x"]) / 2
-            p.body_y = (left_shoulder["y"] + right_shoulder["y"]) / 2
-            p.shoulder_width = abs(right_shoulder["x"] - left_shoulder["x"])
+            # --- Head pose ---
+            pitch, yaw, roll = _compute_head_pose(lm)
+            # Wider range: divide by 15 instead of 30
+            p.head_pitch = _deadzone(_clamp(pitch / 15.0))
+            p.head_yaw = _deadzone(_clamp(yaw / 15.0))
+            p.head_roll = _deadzone(_clamp(roll / 20.0))
 
-            # Arms: elbow position relative to shoulder
-            if len(pose_landmarks) > 16:
-                left_elbow = pose_landmarks[13]
-                left_shoulder_pos = pose_landmarks[11]
-                p.left_arm_x = _clamp((left_elbow["x"] - left_shoulder_pos["x"]) * 2.0)
-                p.left_arm_y = _clamp((left_elbow["y"] - left_shoulder_pos["y"]) * 2.0)
+        if pose_landmarks and len(pose_landmarks) > 14:
+            # Shoulders
+            ls = pose_landmarks[11]
+            rs = pose_landmarks[12]
+            p.body_x = (ls["x"] + rs["x"]) / 2
+            p.body_y = (ls["y"] + rs["y"]) / 2
+            p.shoulder_width = abs(rs["x"] - ls["x"])
 
-                right_elbow = pose_landmarks[14]
-                right_shoulder_pos = pose_landmarks[12]
-                p.right_arm_x = _clamp((right_elbow["x"] - right_shoulder_pos["x"]) * 2.0)
-                p.right_arm_y = _clamp((right_elbow["y"] - right_shoulder_pos["y"]) * 2.0)
+            # Arms
+            le = pose_landmarks[13]
+            p.left_arm_x = _deadzone(_clamp((le["x"] - ls["x"]) * 2.5))
+            p.left_arm_y = _deadzone(_clamp((le["y"] - ls["y"]) * 2.5))
+
+            re = pose_landmarks[14]
+            p.right_arm_x = _deadzone(_clamp((re["x"] - rs["x"]) * 2.5))
+            p.right_arm_y = _deadzone(_clamp((re["y"] - rs["y"]) * 2.5))
 
         # Apply preset overlay
         if self.preset:
-            p.left_eye_open = p.left_eye_open * 0.3 + self.preset.get("left_eye_open", 0.5) * 0.7
-            p.right_eye_open = p.right_eye_open * 0.3 + self.preset.get("right_eye_open", 0.5) * 0.7
-            p.mouth_open = p.mouth_open * 0.3 + self.preset.get("mouth_open", 0.0) * 0.7
-            p.mouth_smile = p.mouth_smile * 0.3 + self.preset.get("mouth_smile", 0.0) * 0.7
-            p.left_eyebrow = p.left_eyebrow * 0.3 + self.preset.get("left_eyebrow", 0.0) * 0.7
-            p.right_eyebrow = p.right_eyebrow * 0.3 + self.preset.get("right_eyebrow", 0.0) * 0.7
+            blend = 0.7
+            inv = 1.0 - blend
+            p.left_eye_open = p.left_eye_open * inv + self.preset.get("left_eye_open", 0.5) * blend
+            p.right_eye_open = p.right_eye_open * inv + self.preset.get("right_eye_open", 0.5) * blend
+            p.mouth_open = p.mouth_open * inv + self.preset.get("mouth_open", 0.0) * blend
+            p.mouth_smile = p.mouth_smile * inv + self.preset.get("mouth_smile", 0.0) * blend
+            p.left_eyebrow = p.left_eyebrow * inv + self.preset.get("left_eyebrow", 0.0) * blend
+            p.right_eyebrow = p.right_eyebrow * inv + self.preset.get("right_eyebrow", 0.0) * blend
 
-        # Smooth
+        # Smooth all values
         s = self.smooth
-        alpha = config.SMOOTH_ALPHA
-        head_alpha = config.HEAD_SMOOTH_ALPHA
-        body_alpha = config.BODY_SMOOTH_ALPHA
+        a = config.SMOOTH_ALPHA
+        ha = config.HEAD_SMOOTH_ALPHA
+        ba = config.BODY_SMOOTH_ALPHA
 
-        s.left_eye_open = _smooth(s.left_eye_open, p.left_eye_open, alpha)
-        s.right_eye_open = _smooth(s.right_eye_open, p.right_eye_open, alpha)
-        s.eye_x = _smooth(s.eye_x, p.eye_x, alpha)
-        s.eye_y = _smooth(s.eye_y, p.eye_y, alpha)
-        s.mouth_open = _smooth(s.mouth_open, p.mouth_open, alpha)
-        s.mouth_smile = _smooth(s.mouth_smile, p.mouth_smile, alpha)
-        s.left_eyebrow = _smooth(s.left_eyebrow, p.left_eyebrow, alpha)
-        s.right_eyebrow = _smooth(s.right_eyebrow, p.right_eyebrow, alpha)
-        s.head_pitch = _smooth(s.head_pitch, p.head_pitch, head_alpha)
-        s.head_yaw = _smooth(s.head_yaw, p.head_yaw, head_alpha)
-        s.head_roll = _smooth(s.head_roll, p.head_roll, head_alpha)
-        s.body_x = _smooth(s.body_x, p.body_x, body_alpha)
-        s.body_y = _smooth(s.body_y, p.body_y, body_alpha)
-        s.shoulder_width = _smooth(s.shoulder_width, p.shoulder_width, body_alpha)
-        s.left_arm_x = _smooth(s.left_arm_x, p.left_arm_x, body_alpha)
-        s.left_arm_y = _smooth(s.left_arm_y, p.left_arm_y, body_alpha)
-        s.right_arm_x = _smooth(s.right_arm_x, p.right_arm_x, body_alpha)
-        s.right_arm_y = _smooth(s.right_arm_y, p.right_arm_y, body_alpha)
+        s.left_eye_open = _smooth(s.left_eye_open, p.left_eye_open, a)
+        s.right_eye_open = _smooth(s.right_eye_open, p.right_eye_open, a)
+        s.eye_x = _smooth(s.eye_x, p.eye_x, a)
+        s.eye_y = _smooth(s.eye_y, p.eye_y, a)
+        s.mouth_open = _smooth(s.mouth_open, p.mouth_open, a)
+        s.mouth_smile = _smooth(s.mouth_smile, p.mouth_smile, a)
+        s.left_eyebrow = _smooth(s.left_eyebrow, p.left_eyebrow, a)
+        s.right_eyebrow = _smooth(s.right_eyebrow, p.right_eyebrow, a)
+        s.head_pitch = _smooth(s.head_pitch, p.head_pitch, ha)
+        s.head_yaw = _smooth(s.head_yaw, p.head_yaw, ha)
+        s.head_roll = _smooth(s.head_roll, p.head_roll, ha)
+        s.body_x = _smooth(s.body_x, p.body_x, ba)
+        s.body_y = _smooth(s.body_y, p.body_y, ba)
+        s.shoulder_width = _smooth(s.shoulder_width, p.shoulder_width, ba)
+        s.left_arm_x = _smooth(s.left_arm_x, p.left_arm_x, ba)
+        s.left_arm_y = _smooth(s.left_arm_y, p.left_arm_y, ba)
+        s.right_arm_x = _smooth(s.right_arm_x, p.right_arm_x, ba)
+        s.right_arm_y = _smooth(s.right_arm_y, p.right_arm_y, ba)
 
         return AnimationParams(
             left_eye_open=s.left_eye_open,
