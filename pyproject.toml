@@ -5,7 +5,7 @@ description = "Real-time webcam-driven cartoon avatar system"
 requires-python = ">=3.10"
 dependencies = [
     "opencv-python>=4.8.0",
-    "mediapipe>=0.10.0",
+    "mediapipe>=0.10.16",
     "pygame>=2.5.0",
     "numpy>=1.24.0",
 ]
